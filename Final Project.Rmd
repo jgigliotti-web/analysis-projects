@@ -1,0 +1,349 @@
+---
+title: "Medical Insurance Charges - GLM Final Project"
+author: Jacob Gigliotti
+output: html_document
+date: "2025-12-9"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Final Project
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+
+data <- read.csv("FPD.CSV")
+
+# Set categorical variables as factors
+data$sex    <- factor(data$sex)
+data$smoker <- factor(data$smoker)
+data$region <- factor(data$region)
+
+str(data)
+summary(data)
+
+library(tidyverse)
+library(MASS)
+library(lmtest)
+
+library(ggplot2)
+
+# Histogram of charges to justify Gamma GLM
+ggplot(data, aes(x = charges)) +
+  geom_histogram(bins = 40, color = "black") +
+  labs(title = "Distribution of Medical Charges", x = "Charges", y = "Count")
+
+
+
+```
+
+```{r}
+# 2. Data Patterns: charges vs X
+library(tidyverse)
+
+# Charges vs age by smoker
+ggplot(data, aes(x = age, y = charges, color = smoker)) +
+  geom_point() +
+  facet_wrap(~smoker, nrow = 1)
+
+# Charges vs BMI by smoker
+ggplot(data, aes(x = bmi, y = charges, color = smoker)) +
+  geom_point() +
+  facet_wrap(~smoker, nrow = 1)
+
+# Charges vs age by region
+ggplot(data, aes(x = age, y = charges, color = region)) +
+  geom_point() +
+  facet_wrap(~region, nrow = 2)
+                
+
+```
+
+```{r}
+# 3. Determine Link Function 
+
+
+# Try log(charges) vs numerical X’s within categories to justify log link
+ggplot(data, aes(x = age, y = log(charges), color = smoker)) +
+  geom_point() +
+  facet_wrap(~smoker, nrow = 1)
+
+ggplot(data, aes(x = bmi, y = log(charges), color = smoker)) +
+  geom_point() +
+  facet_wrap(~smoker, nrow = 1)
+
+# If relationships look roughly linear on log scale → choose link = "log".
+```
+
+```{r}
+data1 <- data
+colnames(data1)[which(names(data1) == "charges")] <- "y"
+
+library(bestglm)
+
+result <- bestglm(Xy = data1,
+                  family = Gamma(link = "log"),
+                  IC = "AIC")
+result$BestModels
+```
+
+```{r}
+library(lmtest)
+
+# Main-effects model (like mod0 in Note33)
+mod0 <- glm(charges ~ age + bmi + children + sex + smoker + region,
+            family = Gamma(link = "log"),
+            data = data)
+
+# Try interaction: smoker:bmi
+mod1 <- glm(charges ~ age + bmi + children + sex + region +
+              smoker * bmi,
+            family = Gamma(link = "log"),
+            data = data)
+
+lrtest(mod0, mod1)
+# If p-value is large → interaction not needed.
+
+# Try interaction: age:bmi
+mod2 <- glm(charges ~ age * bmi + children + sex + smoker + region,
+            family = Gamma(link = "log"),
+            data = data)
+
+lrtest(mod0, mod2)
+# Again, keep only if LR test p-value < 0.05.
+
+# Assume best model is mod0 (no interactions), like in the note
+best_mod <- mod0
+```
+
+```{r}
+mod0 <- glm(charges ~ age + bmi + children + sex + smoker + region,
+            family = Gamma(link = "log"),
+            data = data)
+
+summary(mod0)
+
+library(lmtest)
+
+mod1 <- glm(charges ~ age + bmi + children + sex + region + smoker*bmi,
+            family = Gamma(link="log"), data=data)
+
+lrtest(mod0, mod1)     # Keep interaction only if p < 0.05
+
+mod2 <- glm(charges ~ age + bmi + children + sex + region + smoker*age,
+            family = Gamma(link="log"), data=data)
+
+lrtest(mod0, mod2)
+
+mod3 <- glm(charges ~ age + bmi + children + sex + smoker + region*bmi,
+            family = Gamma(link="log"), data=data)
+
+lrtest(mod0, mod3)
+
+mod4 <- glm(charges ~ age + bmi + children + smoker + region + sex*bmi,
+            family = Gamma(link="log"), data=data)
+
+lrtest(mod0, mod4)
+
+```
+
+```{r}
+final_mod <- glm(
+  charges ~ age + bmi + children + sex + smoker + region +
+            smoker*bmi + smoker*age + region*bmi,
+  family = Gamma(link = "log"),
+  data = data
+)
+lrtest(mod0, final_mod)
+
+
+```
+
+```{r}
+library(performance)
+check_model(final_mod)
+```
+
+```{r}
+summary(final_mod)
+confint(final_mod, level = 0.95)
+
+```
+
+```{r}
+# Charges vs age with Gamma GLM smooth
+ggplot(data, aes(x = age, y = charges, color = smoker)) +
+  geom_point() +
+  geom_smooth(method = "glm",
+              method.args = list(family = Gamma(link = "log")),
+              se = TRUE) +
+  labs(title = "Charges vs Age with Gamma GLM Fit")
+
+# Charges vs BMI with Gamma GLM smooth
+ggplot(data, aes(x = bmi, y = charges, color = smoker)) +
+  geom_point() +
+  geom_smooth(method = "glm",
+              method.args = list(family = Gamma(link = "log")),
+              se = TRUE) +
+  labs(title = "Charges vs BMI with Gamma GLM Fit")
+```
+
+```{r}
+# Predict charges for a specific profile
+newdata <- data.frame(
+  age      = 40,
+  bmi      = 30,
+  children = 1,
+  sex      = factor("male", levels = levels(data$sex)),
+  smoker   = factor("no",   levels = levels(data$smoker)),
+  region   = factor("southeast", levels = levels(data$region))
+)
+pred <- predict(best_mod, newdata, type = "response")
+pred 
+predict(final_mod, newdata = data.frame(age = 40, bmi = 30, children = 1, 
+                                        sex = "male", smoker = "yes", 
+                                        region = "southeast"), type = "response")
+
+predict(final_mod, newdata = data.frame(age = 20, bmi = 22, children = 0, 
+                                        sex = "female", smoker = "no", 
+                                        region = "northeast"), type = "response")
+
+predict(final_mod, newdata = data.frame(age = 60, bmi = 30, children = 1, 
+                                        sex = "male", smoker = "yes", 
+                                        region = "southeast"), type = "response") 
+```
+
+# Report
+
+## 1. Introduction
+
+Healthcare costs in the United States vary across individuals, this is driven by demographic characteristics, health behaviors, as well as regional factors. Understanding the determinants of medical insurance charges is important for insurers, policymakers, and individuals, as it helps with pricing, risk assessment, and evaluating which insurance plan is needed for an individual.
+
+The purpose of this study is to model annual medical insurance charges using individual demographic and health-related variables. Since medical charges and the data points are strictly positive and highly right-skewed, linear regressions were not needed. Instead, this study applies a Gamma GLM with a log link to better present the distributional properties of medical costs. This analysis examines how age, BMI, number of children, sex, smoking status, and geographic region influence the expected medical charges of an individual, while also allowing for interaction effects where relationships differ across subgroups.
+
+## 2. Data Description
+
+The dataset used in this study is from a widely used medical insurance dataset containing 2,772 observations and 7 variables. Each observation corresponds to an insurance policyholder.
+
+### Response Variable
+
+-   **Charges**: The y variable in this dataset is annual medical insurance charges for an individual. This variable is continuous, strictly positive, and exhibits a heavy right tail, with values ranging from approximately \$1,122 to over \$63,000.
+
+### Predictor Variables
+
+-   **Age**: Age of the policyholder, ranging from 18-64 years old.
+
+<!-- -->
+
+-   **BMI**: Body Mass Index, a measure of body fat based on height and weight.
+
+<!-- -->
+
+-   **Children**: Number of dependents covered by the insurance plan.
+
+<!-- -->
+
+-   **Sex**: Female or male.
+
+<!-- -->
+
+-   **Smoker**: Indicator of whether the individual is a smoker
+
+<!-- -->
+
+-   **Region**: Geographic region of policyholder
+
+The summary shows that the average age is about 39 years, the average BMI is approximately 30.7, and the average annual medical charge is around \$13,261. Most individuals are non-smokers, but smokers account for a large amount of the high-cost policyholders.
+
+Initial data visualizations show that medical charges increase with age and BMI, particularly among smokers. Smokers consistently exhibit higher medical costs than non-smokers. These patterns suggest potential interaction effects between smoking status and other predictors.
+
+![](images/clipboard-2393988865.png){width="473"}
+
+![](images/clipboard-1875021591.png){width="473"}
+
+![](images/clipboard-1652976920.png){width="416"}
+
+### 3. Model and Method Selection
+
+Standard Ordinary Least Squaresregression needs a normal distribution and constant variance. Because medical charges are strictly positive and heavily skewed, a Gamma GLM with a log link was selected.
+
+-   **Gamma Distribution**: Designed for continuous, positive data where the variance increases with the mean, which is a very typical of insurance data.
+
+-   **Log Link Function**: Ensures all predicted values are positive
+
+Model Selection Process:
+
+AIC selection showed that all six predictors were relevant. However, the Likelihood Ratio Tests were used to confirm the necessity of interaction terms. Tests for smoker\*bmi and smoker\*age returned p-values near zero justifying a complex model that accounts for compounding risks.
+
+![](images/clipboard-2281678955.png){width="426"}
+
+![](images/clipboard-751398272.png){width="426"}
+
+### 4.Model Assumption Checking
+
+Before finalizing the inferences, the model was validated using the check model function:
+
+-   **Posterior Predictive Check**: This test confirmed that the model's simulated data closely mimics the distribution of the actual insurance charges.
+
+-   **Residual Analysis**: The check proved that the log link effectively addressed the issue of non-constant variance.
+
+-   **Influence and Outliers**: The check indicated that no single observation was manipulating the model’s coefficients.
+
+![](images/clipboard-2872588527.png){width="398"}
+
+### 5. Inference and Analysis
+
+The final model reveals that medical insurance risk is multiplicative rather than additive. So for a traditional additive model, each risk factor would add a fixed dollar amount to the individual charge. However, this Gamma model indicates that risks multiply each other. This means that the presence of one factor can actually makes every other factor more expensive.
+
+Because the model uses a log link, every coefficient represents a percentage increase rather than a flat fee. for example, the cost of getting older is not constant; it compounds based on the existing health profile of the policyholder. As the base bill grows larger due to factors like BMI or smoking, every other percentage-based for each increase for each factor becomes significantly more expensive.
+
+#### The Smoking Multiplier
+
+The most dominant finding of this analysis is that smoking is the biggest facotr for the cost.
+
+-   Smoking is the primary driver of cost. Holding all other factors equal, being a smoker multiplies the expected medical charges by a massive amount compared to non-smokers.
+
+<!-- -->
+
+-   Beyond its own cost, smoking changes the cost of other variables as well. This is because smoking acts as a catalyst making it easier to gain weight as well as increase the effects of aging faster than it normally would.
+
+#### Compounding BMI Risk
+
+Another finding is that between the interaction between smoking and BMI. The data proves that the financial impact of a high BMI is not the same for everyone, but it is significantly amplified for smokers.
+
+-   For those who do not smoke, the cost increase associated with gaining weight is steady.
+
+-   For smokers, the interaction effect shows that the cost increases as BMI increases.
+
+This interaction demonstrates that the smoking status makes the body much more sensitive to the costs of weight gain.
+
+#### Other Effects
+
+The multiplicative nature of the model also applies to demographic variables.
+
+-   **Regional Variation**: The model also found that region interacts with BMI. This shows that the cost of weight-related health issues may vary depending on the local healthcare infrastructure, regional health trends, or cost of living in different parts of the country.
+
+Ultimately, the inference of this model is that medical costs do not grow in a straight line. The more risk factors a person has, the more those factors multiply the total financial cost for their healthcare plan.
+
+![](images/clipboard-95394680.png){width="466"}
+
+![](images/clipboard-1049328809.png){width="465"}
+
+### 6. Prediction
+
+To show how these multipliers work in real life, the model was used to predict annual charges for four different people. By comparing these cases, it becomes clear how costs "snowball" when risks are combined.
+
+#### Comparison of Risk Scenarios
+
+The model predicts that a Healthy Youth (20 years old, non-smoker, BMI of 22) would pay approximately \$3634.081 per year. In contrast, an Average Adult (40 years old, non-smoker, BMI of 30) sees their cost rise to \$6,852.26.
+
+The most dramatic change occurs when smoking is introduced. A High-Risk Adult with the exact same age and BMI as the average adult, but who smokes, jumps to a predicted cost of \$28,039 . Finally, an Extreme Risk individual (60 years old, smoker, BMI of 30) reaches a predicted annual cost of \$32,600 .
+
+### 7. Conclusion
+
+In conclusion, this analysis proves that medical insurance charges follow a multiplicative effect rather than a simple addition of costs. By using a Gamma model, we can see that risk factors like smoking, high BMI, and age do not just add flat fees to a bill; instead, they multiply the total cost. This is best illustrated by the fact that smoking acts as a massive catalyst, making every year of aging and every point of BMI significantly more expensive than it would be for a non-smoker. This meaning that having multiple risk factors is far more financially devastating than the sum of their individual parts.

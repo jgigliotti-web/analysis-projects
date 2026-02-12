@@ -1,0 +1,126 @@
+---
+title: "Conference Tier list"
+output: html_document
+date: "2026-01-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+############################################################
+# PROJECT: The Conference Premium
+# GOAL: Rank Conferences by their 'Draft Boost'
+# MODEL: Multivariate Regression (Draft Pick ~ Stats + Conference)
+############################################################
+
+library(tidyverse)
+
+# 1. LOAD DATA
+col_stats <- read.csv("college_statistics.csv")
+draft     <- read.csv("nfl_draft_prospects.csv")
+
+# 2. DEFINE THE CONFERENCES (Manual Mapping)
+# We map the major schools to their Power 5 Conference
+get_conference <- function(school) {
+  if (school %in% c("Alabama", "LSU", "Georgia", "Florida", "Auburn", "Texas A&M", 
+                    "Ole Miss", "Mississippi State", "Tennessee", "Arkansas", 
+                    "Kentucky", "Missouri", "South Carolina", "Vanderbilt")) {
+    return("SEC")
+  } else if (school %in% c("Ohio State", "Michigan", "Penn State", "Wisconsin", 
+                           "Iowa", "Michigan State", "Minnesota", "Northwestern", 
+                           "Indiana", "Purdue", "Illinois", "Maryland", "Rutgers", "Nebraska")) {
+    return("Big Ten")
+  } else if (school %in% c("Clemson", "Miami (FL)", "Florida State", "North Carolina", 
+                           "Virginia Tech", "Louisville", "NC State", "Pittsburgh", 
+                           "Virginia", "Wake Forest", "Georgia Tech", "Boston College", 
+                           "Syracuse", "Duke", "Notre Dame")) {
+    return("ACC")
+  } else if (school %in% c("Oklahoma", "Texas", "Oklahoma State", "TCU", "Baylor", 
+                           "Iowa State", "Kansas State", "West Virginia", "Texas Tech", "Kansas")) {
+    return("Big 12")
+  } else if (school %in% c("USC", "Oregon", "Washington", "Utah", "Stanford", 
+                           "Arizona State", "California", "UCLA", "Washington State", 
+                           "Arizona", "Oregon State", "Colorado")) {
+    return("Pac-12")
+  } else {
+    return("Group of 5 / FCS")
+  }
+}
+
+# 3. PREPARE COLLEGE STATS (WRs)
+stats_clean <- col_stats %>%
+  filter(pos_abbr == "WR") %>%
+  filter(statistic %in% c("Receiving Yards", "Receiving Touchdowns")) %>%
+  group_by(player_name, school) %>%
+  summarize(
+    Total_Yards = sum(value, na.rm = TRUE),
+    Total_TDs   = sum(value, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  filter(Total_Yards > 1000) # Only look at productive players
+
+# 4. PREPARE DRAFT DATA
+draft_clean <- draft %>%
+  filter(position == "Wide Receiver") %>%
+  select(player_name, Draft_Pick = overall, Height = height, Weight = weight) %>%
+  drop_na(Draft_Pick)
+
+# 5. MERGE & APPLY CONFERENCE MAPPING
+conf_data <- inner_join(stats_clean, draft_clean, by = "player_name") %>%
+  rowwise() %>%
+  mutate(Conference = get_conference(school)) %>%
+  ungroup()
+
+# Set "Group of 5 / FCS" as the Baseline for comparison
+conf_data$Conference <- relevel(as.factor(conf_data$Conference), ref = "Group of 5 / FCS")
+
+print(paste("Players Analyzed:", nrow(conf_data)))
+
+# 6. THE MODEL: RANKING THE CONFERENCES
+# The coefficients tell us how many picks EARLIER a player goes compared to a G5 player
+conf_model <- lm(Draft_Pick ~ Total_Yards + Total_TDs + Conference, data = conf_data)
+
+summary(conf_model)
+
+# 7. VISUALIZATION: THE CONFERENCE TIER LIST
+# We plot the Average Draft Pick by Conference
+avg_picks <- conf_data %>%
+  group_by(Conference) %>%
+  summarize(Avg_Pick = mean(Draft_Pick), Count = n()) %>%
+  arrange(Avg_Pick) # Lower is Better
+
+ggplot(avg_picks, aes(x = reorder(Conference, Avg_Pick), y = Avg_Pick, fill = Conference)) +
+  geom_bar(stat = "identity", color = "black") +
+  coord_flip() + # Horizontal Bars
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "The Conference Premium: Average Draft Position by League",
+    subtitle = "Lower Bar = Higher Draft Capital (Better)",
+    x = "Conference",
+    y = "Average Draft Pick Number"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```

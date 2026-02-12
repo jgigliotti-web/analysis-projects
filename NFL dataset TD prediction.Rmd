@@ -1,0 +1,1005 @@
+---
+title: "NFL dataset"
+output: html_document
+date: "2026-01-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+############################################################
+# OPTION 3 (WR/TE): Predict "Scored a Receiving TD?" (0/1)
+# Model: Logistic Regression (Binomial GLM)
+# File: Game_Logs_Wide_Receiver_and_Tight_End.csv
+############################################################
+
+# 0) Packages
+# If not installed, run: install.packages(c("tidyverse", "lmtest", "performance"))
+library(tidyverse)
+library(lmtest)
+library(performance)
+library(janitor)
+
+############################################################
+# 1) Read data
+############################################################
+data <- read.csv("Game_Logs_Wide_Receiver_and_Tight_End.csv")
+
+############################################################
+# 2) Rename columns and Clean Data
+############################################################
+# Rename to avoid spaces
+data <- data %>%
+  rename(
+    Player_Id = `Player.Id`,
+    Home_or_Away = `Home.or.Away`,
+    Game_Date = `Game.Date`,
+    Games_Played = `Games.Played`,
+    Games_Started = `Games.Started`,
+    Receiving_Yards = `Receiving.Yards`,
+    Yards_Per_Reception = `Yards.Per.Reception`,
+    Longest_Reception = `Longest.Reception`,
+    Receiving_TDs = `Receiving.TDs`,
+    Rushing_Attempts = `Rushing.Attempts`,
+    Rushing_Yards = `Rushing.Yards`,
+    Yards_Per_Carry = `Yards.Per.Carry`,
+    Longest_Rushing_Run = `Longest.Rushing.Run`,
+    Rushing_TDs = `Rushing.TDs`,
+    Fumbles_Lost = `Fumbles.Lost`
+  )
+
+# CLEANING: Replace "--" with "0" and remove "T" (for Touchdown) from yardage strings
+# Then convert them to numeric.
+numeric_cols <- c("Receptions", "Receiving_Yards", "Yards_Per_Reception", 
+                  "Longest_Reception", "Games_Started", "Receiving_TDs")
+
+data <- data %>%
+  mutate(across(all_of(numeric_cols), ~ as.numeric(gsub("T", "", gsub("--", "0", .)))))
+
+############################################################
+# 3) Create binary response: td (0/1)
+############################################################
+data$td <- ifelse(data$Receiving_TDs > 0, 1, 0)
+
+# Check distribution
+cat("TD Distribution:\n")
+print(table(data$td))
+print(prop.table(table(data$td)))
+
+############################################################
+# 4) Factor categorical variables
+############################################################
+# Handle missing positions so we don't lose rows
+data$Position <- fct_explicit_na(factor(data$Position), na_level = "Unknown")
+
+data$Season       <- factor(data$Season)
+data$Home_or_Away <- factor(data$Home_or_Away)
+data$Opponent     <- factor(data$Opponent)
+data$Outcome      <- factor(data$Outcome)
+
+############################################################
+# 5) Quick EDA
+############################################################
+# TD rate by position
+data %>%
+  group_by(Position) %>%
+  summarize(td_rate = mean(td, na.rm = TRUE), n = n())
+
+# Receptions vs TD
+ggplot(data, aes(x = factor(td), y = Receptions)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7) +
+  labs(x = "Scored Receiving TD? (0=No, 1=Yes)", y = "Receptions",
+       title = "Receptions vs TD Outcome")
+
+############################################################
+# 6) Build modeling dataset (drop remaining missing rows)
+############################################################
+model_data <- data %>%
+  select(td, Receptions, Receiving_Yards, Yards_Per_Reception, Longest_Reception,
+         Games_Started, Week, Season, Home_or_Away, Position) %>%
+  drop_na()
+
+cat("Rows remaining for model:", nrow(model_data), "\n")
+
+############################################################
+# 7) Logistic regression + LR tests
+############################################################
+# Null model
+mod0 <- glm(td ~ 1, family = "binomial", data = model_data)
+
+# Main-effects model
+mod1 <- glm(td ~ Receptions + Receiving_Yards + Yards_Per_Reception + Longest_Reception +
+              Games_Started + Week + Season + Home_or_Away + Position,
+            family = "binomial", data = model_data)
+
+# Does mod1 improve over null?
+print(lrtest(mod1, mod0))
+
+# Interaction: efficiency may differ by position
+mod2 <- glm(td ~ Receptions + Receiving_Yards + Yards_Per_Reception*Position +
+              Longest_Reception + Games_Started + Week + Season + Home_or_Away,
+            family = "binomial", data = model_data)
+
+# Interaction: big-play impact may differ home vs away
+mod3 <- glm(td ~ Receptions + Receiving_Yards + Yards_Per_Reception + Longest_Reception*Home_or_Away +
+              Games_Started + Week + Season + Position,
+            family = "binomial", data = model_data)
+
+# Compare models - keep the one with the significantly lower log-likelihood (p < 0.05)
+print(lrtest(mod1, mod2))
+print(lrtest(mod1, mod3))
+
+# Choosing final model (adjust based on your LR test results)
+final_mod <- mod1 
+
+summary(final_mod)
+exp(coef(final_mod)) # Odds Ratios
+
+############################################################
+# 8) Diagnostics
+############################################################
+# Requires 'performance' and 'see' packages
+check_model(final_mod)
+
+############################################################
+# 9) Prediction section
+############################################################
+# Setup baseline player scenario
+base <- data.frame(
+  Receptions = 6,
+  Receiving_Yards = 80,
+  Yards_Per_Reception = 13,
+  Longest_Reception = 25,
+  Games_Started = 1,
+  Week = 10,
+  Season = factor("Regular Season", levels = levels(model_data$Season)),
+  Home_or_Away = factor("Home", levels = levels(model_data$Home_or_Away)),
+  Position = factor("WR", levels = levels(model_data$Position))
+)
+
+# Baseline probability
+p_base <- predict(final_mod, newdata = base, type = "response")
+cat("Baseline P(TD):", round(p_base, 4), "\n")
+
+# Vary Receptions (0 to 12)
+vary_rec <- base[rep(1, 13), ]
+vary_rec$Receptions <- 0:12
+vary_rec$pred_prob <- predict(final_mod, newdata = vary_rec, type = "response")
+
+ggplot(vary_rec, aes(x = Receptions, y = pred_prob)) +
+  geom_line(color = "red", size = 1) +
+  geom_point() +
+  ylim(0, 1) +
+  labs(title = "Effect of Receptions on TD Probability",
+       y = "Predicted P(TD=1)", x = "Number of Receptions")
+
+# Compare Home vs Away
+home_away_compare <- base[rep(1, 2), ]
+home_away_compare$Home_or_Away <- factor(c("Home", "Away"), levels = levels(model_data$Home_or_Away))
+home_away_compare$pred_prob <- predict(final_mod, newdata = home_away_compare, type = "response")
+
+print(home_away_compare %>% select(Home_or_Away, pred_prob))
+```
+
+```{r}
+############################################################
+# OPTION 3 (WR/TE): Predict "Scored a Receiving TD?" (0/1)
+# Model: Logistic Regression (Binomial GLM)
+############################################################
+
+# 0) Packages
+library(tidyverse)
+library(lmtest)
+library(performance)
+library(see) # Required for plotting performance checks
+
+############################################################
+# 1) Read data
+############################################################
+data <- read.csv("Game_Logs_Wide_Receiver_and_Tight_End.csv")
+
+############################################################
+# 2) Rename columns and Clean Data
+############################################################
+# Rename to match standard R naming (replacing dots with underscores)
+data <- data %>%
+  rename(
+    Player_Id = Player.Id,
+    Home_or_Away = Home.or.Away,
+    Game_Date = Game.Date,
+    Games_Played = Games.Played,
+    Games_Started = Games.Started,
+    Receiving_Yards = Receiving.Yards,
+    Yards_Per_Reception = Yards.Per.Reception,
+    Longest_Reception = Longest.Reception,
+    Receiving_TDs = Receiving.TDs,
+    Rushing_Attempts = Rushing.Attempts,
+    Rushing_Yards = Rushing.Yards,
+    Yards_Per_Carry = Yards.Per.Carry,
+    Longest_Rushing_Run = Longest.Rushing.Run,
+    Rushing_TDs = Rushing.TDs,
+    Fumbles_Lost = Fumbles.Lost
+  )
+
+# CLEANING: Fix the "--" and "T" issues in numeric columns
+numeric_cols <- c("Receptions", "Receiving_Yards", "Yards_Per_Reception", 
+                  "Longest_Reception", "Games_Started", "Receiving_TDs")
+
+data <- data %>%
+  mutate(across(all_of(numeric_cols), ~ as.numeric(gsub("T", "", gsub("--", "0", .)))))
+
+############################################################
+# 3) Create binary response: td (0/1)
+############################################################
+data$td <- ifelse(data$Receiving_TDs > 0, 1, 0)
+
+############################################################
+# 4) Factor categorical variables
+############################################################
+# Label missing Positions as 'Unknown' to prevent losing 80k+ rows
+data$Position <- fct_explicit_na(factor(data$Position), na_level = "Unknown")
+data$Season       <- factor(data$Season)
+data$Home_or_Away <- factor(data$Home_or_Away)
+
+############################################################
+# 5) Build modeling dataset
+############################################################
+model_data <- data %>%
+  select(td, Receptions, Receiving_Yards, Yards_Per_Reception, Longest_Reception,
+         Games_Started, Week, Season, Home_or_Away, Position) %>%
+  drop_na()
+
+############################################################
+# 6) Logistic regression + LR tests
+############################################################
+mod0 <- glm(td ~ 1, family = "binomial", data = model_data)
+
+mod1 <- glm(td ~ Receptions + Receiving_Yards + Yards_Per_Reception + Longest_Reception +
+              Games_Started + Week + Season + Home_or_Away + Position,
+            family = "binomial", data = model_data)
+
+# Interaction: efficiency may differ by position
+mod2 <- glm(td ~ Receptions + Receiving_Yards + Yards_Per_Reception*Position +
+              Longest_Reception + Games_Started + Week + Season + Home_or_Away,
+            family = "binomial", data = model_data)
+
+lrtest(mod1, mod0)   # does adding predictors improve over null?
+lrtest(mod1, mod2)   # does interaction improve over main effects?
+
+
+# Choose final model (using mod1 as default for stability)
+final_mod <- mod1 
+
+summary(final_mod)
+
+exp(coef(final_mod))      # odds ratios
+exp(confint(final_mod))   # CI for odds ratios (may take a bit)
+
+############################################################
+# 7) FAST Diagnostics (Fixed Function Names)
+############################################################
+
+# 1. Check for Multicollinearity (High VIF means variables are too similar)
+# This is very important because Yards and Receptions usually overlap a lot
+check_collinearity(final_mod)
+
+# 2. Binned Residuals (The correct way to check Logistic Fit)
+# If check_binned_residuals doesn't work, try binned_residuals
+if(exists("check_binned_residuals")){
+  result <- check_binned_residuals(final_mod)
+  plot(result)
+} else {
+  result <- binned_residuals(final_mod)
+  plot(result)
+}
+
+# 3. Performance Summary
+# This gives you the R2 (Tjur's R2 for logistic) and Error rates
+model_performance(final_mod)
+
+# 4. Lite Visual Check 
+# We explicitly tell it NOT to run the posterior predictive check (check="pp_check")
+# because that is what causes R to freeze with 100k rows.
+check_model(final_mod, check = c("vif", "binormal", "linearity"))
+
+############################################################
+# 8) Prediction section
+############################################################
+base <- data.frame(
+  Receptions = 6,
+  Receiving_Yards = 80,
+  Yards_Per_Reception = 13,
+  Longest_Reception = 25,
+  Games_Started = 1,
+  Week = 10,
+  Season = factor("Regular Season", levels = levels(model_data$Season)),
+  Home_or_Away = factor("Home", levels = levels(model_data$Home_or_Away)),
+  Position = factor("WR", levels = levels(model_data$Position))
+)
+
+# Baseline probability
+p_base <- predict(final_mod, newdata = base, type = "response")
+cat("Baseline P(TD):", round(p_base, 4), "\n")
+
+# Plot: Vary Receptions
+vary_rec <- base[rep(1, 13), ]
+vary_rec$Receptions <- 0:12
+vary_rec$pred_prob <- predict(final_mod, newdata = vary_rec, type = "response")
+
+ggplot(vary_rec, aes(x = Receptions, y = pred_prob)) +
+  geom_line(color = "blue", size = 1) +
+  geom_point() +
+  ylim(0, 1) +
+  labs(title = "Effect of Receptions on Predicted TD Probability",
+       y = "P(TD=1)", x = "Receptions")
+```
+
+```{r}
+############################################################
+# OPTION 3 (WR/TE): Predict "Scored a Receiving TD?" (0/1)
+# Model: Logistic Regression (Binomial GLM)
+# UPDATE: Fixed Multicollinearity by removing Receiving_Yards
+############################################################
+
+library(tidyverse)
+library(lmtest)
+library(performance)
+library(see)
+
+############################################################
+# 1) Read & Clean Data
+############################################################
+data <- read.csv("Game_Logs_Wide_Receiver_and_Tight_End.csv")
+
+# Rename columns
+data <- data %>%
+  rename(
+    Player_Id = Player.Id,
+    Home_or_Away = Home.or.Away,
+    Game_Date = Game.Date,
+    Games_Played = Games.Played,
+    Games_Started = Games.Started,
+    Receiving_Yards = Receiving.Yards,
+    Yards_Per_Reception = Yards.Per.Reception,
+    Longest_Reception = Longest.Reception,
+    Receiving_TDs = Receiving.TDs
+  )
+
+# CLEANING: Fix "--" and "T"
+numeric_cols <- c("Receptions", "Receiving_Yards", "Yards_Per_Reception", 
+                  "Longest_Reception", "Games_Started", "Receiving_TDs")
+
+data <- data %>%
+  mutate(across(all_of(numeric_cols), ~ as.numeric(gsub("T", "", gsub("--", "0", .)))))
+
+# Create Target
+data$td <- ifelse(data$Receiving_TDs > 0, 1, 0)
+
+# Factor Variables (Handle missing positions)
+data$Position <- fct_explicit_na(factor(data$Position), na_level = "Unknown")
+data$Season       <- factor(data$Season)
+data$Home_or_Away <- factor(data$Home_or_Away)
+
+# Build Modeling Data
+model_data <- data %>%
+  select(td, Receptions, Receiving_Yards, Yards_Per_Reception, Longest_Reception,
+         Games_Started, Week, Season, Home_or_Away, Position) %>%
+  drop_na()
+
+############################################################
+# 2) The Fixed Model
+############################################################
+# We REMOVED 'Receiving_Yards' to fix the VIF/Collinearity issue.
+# We keep 'Receptions' (Volume) and 'Yards_Per_Reception' (Efficiency).
+
+final_mod <- glm(td ~ Receptions + Yards_Per_Reception + Longest_Reception +
+              Games_Started + Week + Season + Home_or_Away + Position,
+            family = "binomial", data = model_data)
+
+summary(final_mod)
+
+############################################################
+# 3) Diagnostics (Verify the Fix)
+############################################################
+# Check VIF again - Receptions should now be much lower (< 2.5 is ideal)
+check_collinearity(final_mod)
+
+# Check Binned Residuals
+if(exists("check_binned_residuals")){
+  check_binned_residuals(final_mod)
+} else {
+  binned_residuals(final_mod)
+}
+
+############################################################
+# 4) Prediction (Updated)
+############################################################
+# Setup baseline (Removed Receiving_Yards from here too)
+base <- data.frame(
+  Receptions = 6,
+  Yards_Per_Reception = 13.3, # Equivalent to ~80 yards
+  Longest_Reception = 25,
+  Games_Started = 1,
+  Week = 10,
+  Season = factor("Regular Season", levels = levels(model_data$Season)),
+  Home_or_Away = factor("Home", levels = levels(model_data$Home_or_Away)),
+  Position = factor("WR", levels = levels(model_data$Position))
+)
+
+# Baseline probability
+p_base <- predict(final_mod, newdata = base, type = "response")
+cat("Baseline P(TD):", round(p_base, 4), "\n")
+
+# Plot: Vary Receptions
+vary_rec <- base[rep(1, 13), ]
+vary_rec$Receptions <- 0:12
+vary_rec$pred_prob <- predict(final_mod, newdata = vary_rec, type = "response")
+
+ggplot(vary_rec, aes(x = Receptions, y = pred_prob)) +
+  geom_line(color = "darkgreen", size = 1) +
+  geom_point() +
+  ylim(0, 1) +
+  labs(title = "Effect of Receptions on TD Probability (Fixed Model)",
+       subtitle = "Controlling for Efficiency (YPR) instead of Total Yards",
+       y = "Predicted P(TD=1)", x = "Receptions")
+```
+
+```{r}
+library(tidyverse)
+library(zoo) # Required for rolling averages
+
+# 1. Load Data
+data <- read.csv("Game_Logs_Wide_Receiver_and_Tight_End.csv")
+
+# 2. Rename & Clean
+# We must explicitly rename Home.or.Away so the model can find it
+data <- data %>%
+  rename(
+    Player_Id = Player.Id,
+    Home_or_Away = Home.or.Away,  # <--- This was the missing line causing your error
+    Season = Season,
+    Week = Week,
+    Year = Year,
+    Receiving_TDs = Receiving.TDs,
+    Receptions = Receptions,
+    Receiving_Yards = Receiving.Yards
+  ) %>%
+  # Fix "--" and "T" to make them numeric
+  mutate(across(c(Receptions, Receiving_Yards, Receiving_TDs), 
+                ~ as.numeric(gsub("T", "", gsub("--", "0", .))))) %>%
+  # Create Target Variable
+  mutate(td = ifelse(Receiving_TDs > 0, 1, 0)) %>%
+  # Handle Position NAs
+  mutate(Position = fct_explicit_na(factor(Position), na_level = "Unknown"))
+
+# 3. Filter for Regular Season Only (removes Preseason noise)
+data <- data %>% filter(Season == "Regular Season")
+
+# 4. Create "History" Features (The Predictive Part)
+model_data <- data %>%
+  arrange(Player_Id, Year, Week) %>%
+  group_by(Player_Id) %>%
+  mutate(
+    # "Lag": Stats from the PREVIOUS game
+    Prev_Receptions = lag(Receptions, 1),
+    Prev_TD         = lag(td, 1),
+    
+    # "Rolling": Average stats over the LAST 4 games
+    Avg_Receptions_4w = rollapply(Receptions, width=4, FUN=mean, align="right", fill=NA, partial=TRUE),
+    Avg_TD_4w         = rollapply(td, width=4, FUN=mean, align="right", fill=NA, partial=TRUE)
+  ) %>%
+  ungroup() %>%
+  # Drop the first row for each player (since they have no history)
+  drop_na(Prev_Receptions, Avg_Receptions_4w)
+
+# 5. Run the Improved Model
+# We predict 'td' using ONLY past information (Prev_ and Avg_)
+final_mod_v2 <- glm(td ~ Prev_Receptions + Prev_TD + Avg_Receptions_4w + Avg_TD_4w +
+                      Home_or_Away + Position, 
+                    family = "binomial", data = model_data)
+
+summary(final_mod_v2)
+
+# 6. Check Accuracy
+library(performance)
+r2_tjur(final_mod_v2)
+```
+
+```{r}
+library(tidyverse)
+library(zoo)
+
+# 1. Load & Clean
+data <- read.csv("Game_Logs_Wide_Receiver_and_Tight_End.csv")
+
+data <- data %>%
+  rename(
+    Player_Id = Player.Id,
+    Home_or_Away = Home.or.Away,
+    Season = Season,
+    Week = Week,
+    Year = Year,
+    Receiving_TDs = Receiving.TDs,
+    Receptions = Receptions,
+    Receiving_Yards = Receiving.Yards
+  ) %>%
+  mutate(across(c(Receptions, Receiving_Yards, Receiving_TDs), 
+                ~ as.numeric(gsub("T", "", gsub("--", "0", .))))) %>%
+  mutate(td = ifelse(Receiving_TDs > 0, 1, 0)) %>%
+  mutate(Position = fct_explicit_na(factor(Position), na_level = "Unknown")) %>%
+  filter(Season == "Regular Season")
+
+# 2. CREATE FEATURES (THE FIX)
+model_data <- data %>%
+  arrange(Player_Id, Year, Week) %>%
+  group_by(Player_Id) %>%
+  mutate(
+    # 1. Calculate the rolling average (including current row)
+    Rolling_Avg_TD_Raw = rollapply(td, width=4, FUN=mean, align="right", fill=NA, partial=TRUE),
+    Rolling_Avg_Rec_Raw = rollapply(Receptions, width=4, FUN=mean, align="right", fill=NA, partial=TRUE),
+    
+    # 2. LAG THE AVERAGE (The Fix)
+    # We take the rolling average calculated 'yesterday' to predict 'today'
+    Avg_TD_Past4 = lag(Rolling_Avg_TD_Raw, 1),
+    Avg_Receptions_Past4 = lag(Rolling_Avg_Rec_Raw, 1),
+    
+    # Simple Lags
+    Prev_Receptions = lag(Receptions, 1),
+    Prev_TD = lag(td, 1)
+  ) %>%
+  ungroup() %>%
+  drop_na(Avg_TD_Past4, Avg_Receptions_Past4) # Drop rows where we don't have history
+
+# 3. Run the Honest Model
+# Note: We now use 'Avg_TD_Past4' instead of the leaking variable
+final_mod_v3 <- glm(td ~ Prev_Receptions + Prev_TD + Avg_Receptions_Past4 + Avg_TD_Past4 +
+                      Home_or_Away + Position, 
+                    family = "binomial", data = model_data)
+
+summary(final_mod_v3)
+
+# 4. Check Real Performance
+library(performance)
+r2_tjur(final_mod_v3)
+```
+
+```{r}
+############################################################
+# PROJECT: Expected Touchdowns (xTD) & Regression Candidates
+# GOAL: Identify "Unlucky" players to bet on (Buy Low)
+# MODEL: Poisson Regression (GLM)
+############################################################
+
+library(tidyverse)
+library(ggrepel) # For nice plot labels
+
+# 1. Load & Clean Data
+df <- read.csv("Game_Logs_Wide_Receiver_and_Tight_End.csv")
+
+df_clean <- df %>%
+  rename(
+    Player_Id = Player.Id,
+    Home_or_Away = Home.or.Away,
+    Receiving_TDs = Receiving.TDs,
+    Receiving_Yards = Receiving.Yards
+  ) %>%
+  # Fix the "--" and "T" string issues
+  mutate(across(c(Receptions, Receiving_Yards, Receiving_TDs), 
+                ~ as.numeric(gsub("T", "", gsub("--", "0", .))))) %>%
+  filter(Season == "Regular Season") %>%
+  drop_na(Receptions, Receiving_Yards)
+
+# 2. FEATURE ENGINEERING: DEFENSE STRENGTH
+# Does the Opponent give up a lot of TDs generally?
+# We calculate the avg TDs allowed by each team per game
+defense_stats <- df_clean %>%
+  group_by(Opponent) %>%
+  summarize(Opp_TD_Rate = mean(Receiving_TDs, na.rm=TRUE))
+
+# Merge this "Defense Score" back into the main data
+model_data <- df_clean %>%
+  left_join(defense_stats, by = "Opponent")
+
+# 3. THE MODEL: POISSON REGRESSION
+# We use Poisson because TDs are counts (0, 1, 2...)
+# Formula: TDs ~ Volume (Rec/Yds) + Opportunity (Defense Strength)
+xtd_model <- glm(Receiving_TDs ~ Receptions + Receiving_Yards + Opp_TD_Rate + Position,
+                 family = "poisson", 
+                 data = model_data)
+
+summary(xtd_model)
+
+# 4. PREDICT: CALCULATE "EXPECTED TDs" (xTD)
+# We predict the expected count for every single game
+model_data$xTD_Game <- predict(xtd_model, type = "response")
+
+# 5. AGGREGATE: WHO IS THE MOST UNLUCKY PLAYER?
+# We sum up their Actual TDs vs Expected TDs for the whole year (or career)
+season_performance <- model_data %>%
+  group_by(Name, Year, Position) %>%
+  summarize(
+    Games = n(),
+    Actual_TDs = sum(Receiving_TDs),
+    Expected_TDs = sum(xTD_Game),
+    # Difference = Actual - Expected
+    # Negative = Unlucky (Should have scored more) -> BET ON HIM
+    # Positive = Lucky (Scored more than he should) -> FADE HIM
+    TD_Over_Expectation = Actual_TDs - Expected_TDs
+  ) %>%
+  filter(Games >= 10, Expected_TDs > 3) %>% # Filter for relevant starters
+  arrange(TD_Over_Expectation)
+
+# Display Top 10 "Unlucky" Players (Buy Candidates)
+print("Top 10 Buy-Low Candidates (Scored fewer than expected):")
+print(head(season_performance, 10))
+
+# Display Top 10 "Lucky" Players (Sell-High Candidates)
+print("Top 10 Sell-High Candidates (Scored way more than expected):")
+print(tail(season_performance, 10))
+
+# 6. VISUALIZATION (The "Money Plot")
+# This is what goes on your Resume/Portfolio
+ggplot(season_performance, aes(x = Expected_TDs, y = Actual_TDs)) +
+  geom_point(aes(color = Position), alpha = 0.6) +
+  # Add the "Fair" line (x = y)
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "black") +
+  # Label the most extreme outliers
+  geom_text_repel(data = filter(season_performance, abs(TD_Over_Expectation) > 4),
+                  aes(label = paste(Name, Year)), 
+                  size = 3, max.overlaps = 10) +
+  labs(
+    title = "Actual vs. Expected Touchdowns (xTD)",
+    subtitle = "Players below the line are 'Unlucky' (Betting Value)",
+    x = "Expected TDs (Based on Volume & Matchup)",
+    y = "Actual TDs Scored"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+############################################################
+# PROJECT: Expected Touchdowns (xTD) - CORRECTED
+# MODEL: Linear Regression (Stable Predictions)
+############################################################
+
+library(tidyverse)
+library(ggrepel)
+
+# 1. LOAD & CLEAN DATA
+# (Same as before)
+df <- read.csv("Game_Logs_Wide_Receiver_and_Tight_End.csv")
+
+df_clean <- df %>%
+  rename(
+    Player_Id = Player.Id,
+    Home_or_Away = Home.or.Away,
+    Receiving_TDs = Receiving.TDs,
+    Receiving_Yards = Receiving.Yards
+  ) %>%
+  mutate(across(c(Receptions, Receiving_Yards, Receiving_TDs), 
+                ~ as.numeric(gsub("T", "", gsub("--", "0", .))))) %>%
+  filter(Season == "Regular Season") %>%
+  drop_na(Receptions, Receiving_Yards)
+
+# 2. FEATURE ENGINEERING
+# Cap extreme outliers slightly to prevent skew (e.g., negative yards)
+df_clean$Receiving_Yards <- pmax(df_clean$Receiving_Yards, 0)
+
+# Calculate Opponent Defense Strength (Avg TDs allowed)
+defense_stats <- df_clean %>%
+  group_by(Opponent) %>%
+  summarize(Opp_TD_Rate = mean(Receiving_TDs, na.rm=TRUE))
+
+model_data <- df_clean %>%
+  left_join(defense_stats, by = "Opponent")
+
+# 3. THE MODEL: LINEAR REGRESSION (lm)
+# We use 'lm' instead of 'glm(poisson)' to prevent exponential errors on big games.
+# Interpretation: "How many TDs does an average player score with these stats?"
+xtd_model <- lm(Receiving_TDs ~ Receptions + Receiving_Yards + Opp_TD_Rate, 
+                data = model_data)
+
+summary(xtd_model)
+
+# 4. PREDICT & AGGREGATE
+model_data$xTD_Game <- predict(xtd_model)
+
+# Summarize by Season
+season_performance <- model_data %>%
+  group_by(Name, Year, Position) %>%
+  summarize(
+    Games = n(),
+    Actual_TDs = sum(Receiving_TDs),
+    Expected_TDs = sum(xTD_Game),
+    TD_Over_Expectation = Actual_TDs - Expected_TDs
+  ) %>%
+  filter(Games >= 10, Expected_TDs > 3) %>%
+  arrange(TD_Over_Expectation)
+
+# 5. CHECK THE RESULTS (They should be realistic now)
+# Flipper Anderson should be closer to ~8-10 Expected TDs, not 47.
+print("Top 5 Unlucky Players (Buy Low):")
+print(head(season_performance, 5))
+
+print("Top 5 Lucky Players (Sell High):")
+print(tail(season_performance, 5))
+
+# 6. VISUALIZATION
+ggplot(season_performance, aes(x = Expected_TDs, y = Actual_TDs)) +
+  geom_point(aes(color = Position), alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_text_repel(data = filter(season_performance, abs(TD_Over_Expectation) > 4),
+                  aes(label = paste(Name, Year)), 
+                  size = 3) +
+  labs(
+    title = "Actual vs. Expected Touchdowns (Linear Model)",
+    subtitle = "Points below the line are 'Unlucky' | Points above are 'Lucky'",
+    x = "Expected TDs (Based on Volume)",
+    y = "Actual TDs"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+############################################################
+# PROJECT: Dynamic Scoring Probability (Predictive)
+# GOAL: Predict NEXT game's TD chance based on PREVIOUS 4 games
+# MODEL: Logistic Regression with Rolling Averages
+############################################################
+
+library(tidyverse)
+library(zoo) # Required for rolling averages
+
+# 1. LOAD DATA
+df <- read.csv("Game_Logs_Wide_Receiver_and_Tight_End.csv")
+
+# 2. CLEAN & SORT
+df_clean <- df %>%
+  rename(
+    Receiving_TDs = Receiving.TDs,
+    Receiving_Yards = Receiving.Yards
+  ) %>%
+  mutate(across(c(Receptions, Receiving_Yards, Receiving_TDs), 
+                ~ as.numeric(gsub("T", "", gsub("--", "0", .))))) %>%
+  filter(Season == "Regular Season") %>%
+  drop_na(Receptions, Receiving_Yards) %>%
+  # IMPORTANT: Sort by Player and Date so "Previous Game" is actually previous
+  arrange(Name, Year, Week)
+
+# 3. FEATURE ENGINEERING: ROLLING 4-GAME AVERAGES
+# We want to know: How did they play in the LAST 4 games?
+df_rolling <- df_clean %>%
+  group_by(Name) %>%
+  mutate(
+    # "Lag" means looking backwards.
+    # We calculate the average of the PREVIOUS 4 games (excluding the current one)
+    Avg_Rec_Last4 = rollapply(Receptions, width=4, FUN=mean, align="right", fill=NA, partial=TRUE),
+    Avg_Yds_Last4 = rollapply(Receiving_Yards, width=4, FUN=mean, align="right", fill=NA, partial=TRUE),
+    Avg_TDs_Last4 = rollapply(Receiving_TDs, width=4, FUN=mean, align="right", fill=NA, partial=TRUE),
+    
+    # SHIFT variables so row N contains stats from N-1, N-2, N-3, N-4
+    # This ensures we are using PAST data to predict FUTURE result
+    Prev_4_Rec = lag(Avg_Rec_Last4, 1),
+    Prev_4_Yds = lag(Avg_Yds_Last4, 1),
+    Prev_4_TDs = lag(Avg_TDs_Last4, 1),
+    
+    # Target Variable: Did they score > 0 TDs in THIS game?
+    Scored_TD = ifelse(Receiving_TDs > 0, 1, 0)
+  ) %>%
+  ungroup() %>%
+  drop_na(Prev_4_Rec) # Remove first 4 games (can't predict without history)
+
+# 4. THE MODEL: LOGISTIC REGRESSION (Predicting Yes/No)
+# "Does previous form (Volume + Scoring) predict a TD this week?"
+logit_model <- glm(Scored_TD ~ Prev_4_Rec + Prev_4_Yds + Prev_4_TDs + Position, 
+                   data = df_rolling, 
+                   family = "binomial") # Binomial = Yes/No Prediction
+
+summary(logit_model)
+
+# 5. PREDICT: PROBABILITY FOR NEXT GAME
+# Output the % chance (0.00 to 1.00)
+df_rolling$TD_Probability <- predict(logit_model, type = "response")
+
+# 6. VISUALIZATION: DOES "HOT HAND" MATTER?
+# We group players by their predicted probability to see if it works
+accuracy_check <- df_rolling %>%
+  mutate(Prob_Bucket = round(TD_Probability, 1)) %>% # Group into 10%, 20%, 30% buckets
+  group_by(Prob_Bucket) %>%
+  summarize(
+    Games = n(),
+    Actual_Scoring_Rate = mean(Scored_TD)
+  )
+
+ggplot(accuracy_check, aes(x = Prob_Bucket, y = Actual_Scoring_Rate)) +
+  geom_point(size = 3) +
+  geom_line() + 
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Model Calibration: Predicted vs. Actual Scoring Rate",
+    subtitle = "If the model works, the dots should follow the Red Line.",
+    x = "Predicted Probability (Based on Last 4 Games)",
+    y = "Actual % of Games with a TD"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+############################################################
+# PROJECT: Variable Selection (Adding Longest Reception)
+# GOAL: Test if "Explosiveness" (Longest Rec) predicts TDs
+############################################################
+
+library(tidyverse)
+library(zoo)
+library(corrplot)
+
+# 1. LOAD DATA
+df <- read.csv("Game_Logs_Wide_Receiver_and_Tight_End.csv")
+
+# 2. CLEANING (Now with 'Long' column handling)
+df_clean <- df %>%
+  rename(
+    Receiving_TDs = Receiving.TDs,
+    Receiving_Yards = Receiving.Yards,
+    Longest_Rec = Longest.Reception # Adjust name if your CSV calls it 'Long' or 'Lng'
+  ) %>%
+  mutate(
+    # Clean standard stats
+    across(c(Receptions, Receiving_Yards, Receiving_TDs), 
+           ~ as.numeric(gsub("T", "", gsub("--", "0", .)))),
+    
+    # CLEAN 'Longest_Rec': Remove 't' (e.g., '50t' -> 50) and '--'
+    Longest_Rec = as.numeric(gsub("t", "", gsub("T", "", gsub("--", "0", Longest_Rec))))
+  ) %>%
+  filter(Season == "Regular Season") %>%
+  drop_na(Receptions, Longest_Rec) %>%
+  arrange(Name, Year, Week)
+
+# 3. FEATURE ENGINEERING (Adding 'Explosiveness' Candidates)
+model_data <- df_clean %>%
+  group_by(Name) %>%
+  mutate(
+    # --- LAG 1: What happened LAST GAME? ---
+    Prev_Rec  = lag(Receptions, 1),
+    Prev_Long = lag(Longest_Rec, 1), # NEW!
+    
+    # --- LAG 4: What is their MONTHLY FORM? ---
+    Roll_Rec  = rollapply(Receptions, width=4, FUN=mean, align="right", fill=NA, partial=TRUE),
+    Roll_Long = rollapply(Longest_Rec, width=4, FUN=mean, align="right", fill=NA, partial=TRUE), # NEW!
+    
+    # Shift rolling averages to be predictive (Past -> Future)
+    Lag_Roll_Rec  = lag(Roll_Rec, 1),
+    Lag_Roll_Long = lag(Roll_Long, 1), # NEW!
+    
+    # TARGET
+    Scored_TD_Next = ifelse(Receiving_TDs > 0, 1, 0)
+  ) %>%
+  ungroup() %>%
+  drop_na(Lag_Roll_Rec, Lag_Roll_Long)
+
+# 4. CORRELATION RANKING
+# Will 'Longest Rec' beat 'Receptions'?
+cor_matrix <- cor(model_data %>% 
+                    select(Scored_TD_Next, Prev_Rec, Prev_Long, Lag_Roll_Rec, Lag_Roll_Long),
+                  use = "complete.obs")
+
+print("--- VARIABLE RANKING ---")
+print(sort(cor_matrix["Scored_TD_Next",], decreasing = TRUE))
+
+# 5. STEPWISE SELECTION (The moment of truth)
+# We put both into the arena. The model keeps only the useful ones.
+full_model <- glm(Scored_TD_Next ~ Prev_Rec + Prev_Long + Lag_Roll_Rec + Lag_Roll_Long,
+                  data = model_data,
+                  family = "binomial")
+
+best_model <- step(full_model, direction = "both", trace = 0)
+
+print("--- THE WINNING VARIABLES ---")
+summary(best_model)
+
+library(tidyverse)
+library(scales) # For percentage formatting
+
+# --- PRE-STEP: Generate Predictions from your 'best_model' ---
+# We calculate the probability (0% to 100%) for every row
+model_data$Predicted_Prob <- predict(best_model, type = "response")
+
+# ========================================================
+# VISUAL 1: THE PROBABILITY CURVE
+# "How much does increasing Volume increase TD chance?"
+# ========================================================
+ggplot(model_data, aes(x = Lag_Roll_Rec, y = Predicted_Prob)) +
+  # Add the points (jittered slightly so you can see density)
+  geom_jitter(height = 0.02, alpha = 0.05, color = "gray60") +
+  # Add the S-Curve (The Logistic Regression Line)
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), 
+              color = "blue", size = 1.5) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "The 'Volume' Effect: Targets Predict Touchdowns",
+    subtitle = "As Rolling Avg Receptions (x-axis) increases, TD Probability skyrockets.",
+    x = "Avg Receptions (Last 4 Games)",
+    y = "Predicted Probability of Scoring TD Next Game"
+  ) +
+  theme_minimal()
+
+# ========================================================
+# VISUAL 2: THE HEATMAP
+# "Do Deep Threats (High Longest Rec) score more than Possession Receivers?"
+# ========================================================
+# We bin players to see the interaction
+heatmap_data <- model_data %>%
+  mutate(
+    Rec_Bin = cut(Lag_Roll_Rec, breaks = 5), # Low to High Volume
+    Long_Bin = cut(Lag_Roll_Long, breaks = 5) # Short to Long Catches
+  ) %>%
+  group_by(Rec_Bin, Long_Bin) %>%
+  summarize(Avg_Prob = mean(Predicted_Prob), .groups = 'drop')
+
+ggplot(heatmap_data, aes(x = Rec_Bin, y = Long_Bin, fill = Avg_Prob)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "plasma", labels = percent_format()) +
+  labs(
+    title = "The 'Double Threat' Zone",
+    subtitle = "Lighter Color = Higher Probability. \nHigh Volume (Right) + Big Plays (Top) = Guaranteed Scores.",
+    x = "Volume (Receptions)",
+    y = "Explosiveness (Longest Rec)",
+    fill = "TD Chance"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# ========================================================
+# VISUAL 3: MODEL CALIBRATION (The Truth Test)
+# "If the model said 60%, did they actually score 60% of the time?"
+# ========================================================
+calibration <- model_data %>%
+  mutate(
+    # Create buckets: 0-10%, 10-20%, etc.
+    Prob_Bucket = cut(Predicted_Prob, breaks = seq(0, 1, 0.1), include.lowest = TRUE)
+  ) %>%
+  group_by(Prob_Bucket) %>%
+  summarize(
+    Predicted_Avg = mean(Predicted_Prob),
+    Actual_Rate   = mean(Scored_TD_Next),
+    Count = n()
+  )
+
+ggplot(calibration, aes(x = Predicted_Avg, y = Actual_Rate)) +
+  geom_point(aes(size = Count), color = "darkblue") +
+  geom_line(color = "darkblue") +
+  # The Perfect Prediction Line (x = y)
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  scale_x_continuous(labels = percent_format(), limits = c(0,1)) +
+  scale_y_continuous(labels = percent_format(), limits = c(0,1)) +
+  labs(
+    title = "Model Accuracy Check (Calibration Plot)",
+    subtitle = "Dots on the Red Line = Perfect Prediction.\nIf the model predicts 70% chance, the player should score 70% of the time.",
+    x = "Predicted Probability",
+    y = "Actual Scoring Rate"
+  ) +
+  theme_minimal()
+```

@@ -1,0 +1,385 @@
+---
+title: "NFL stats"
+output: html_document
+date: "2026-01-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+############################################################
+# PROJECT: NFL Draft Analytics - WR Physical Profiling
+# GOAL: Predict Career Production based on Physical Traits
+# MODEL: Gamma GLM (Identical structure to your Insurance Project)
+############################################################
+
+library(tidyverse)
+library(ggrepel) # For labeling the "Steals" on the chart
+
+# 1. LOAD DATA
+# R converts spaces and parenthesis to dots (e.g. "Height (inches)" -> "Height..inches.")
+basic   <- read.csv("Basic_Stats.csv")
+career  <- read.csv("Career_Stats_Receiving.csv")
+
+# 2. DATA CLEANING
+# Clean Basic Stats (Traits)
+clean_basic <- basic %>%
+  rename(
+    Player_Id = Player.Id,
+    Height = Height..inches., # Renaming for easier use
+    Weight = Weight..lbs.,
+    College = College
+  ) %>%
+  select(Player_Id, Name, Height, Weight, College) %>%
+  # Filter out rows with missing height/weight
+  drop_na(Height, Weight) %>%
+  # Create BMI (Teams love "Body Density")
+  mutate(BMI = (Weight * 703) / (Height^2))
+
+# Clean Career Stats (Production)
+clean_career <- career %>%
+  rename(
+    Player_Id = Player.Id,
+    Receiving_Yards = Receiving.Yards,
+    Year = Year
+  ) %>%
+  # Fix "1,000" (commas) and "--" (no stats)
+  mutate(Receiving_Yards = as.numeric(gsub(",", "", gsub("--", "0", Receiving_Yards)))) %>%
+  group_by(Player_Id) %>%
+  summarize(
+    Total_Yards = sum(Receiving_Yards, na.rm=TRUE),
+    Years_Played = n_distinct(Year)
+  ) %>%
+  # Target Variable: Yards Per Season (Availability + Skill)
+  mutate(Yards_Per_Year = Total_Yards / Years_Played)
+
+# MERGE TRAITS WITH PRODUCTION
+draft_data <- inner_join(clean_basic, clean_career, by = "Player_Id") %>%
+  # Filter: Only keep players with at least 500 career yards (removes preseason bodies)
+  filter(Total_Yards > 500)
+
+# 3. FEATURE ENGINEERING: PEDIGREE
+# Do "Blue Blood" schools produce better WRs?
+power_schools <- c("Alabama", "Ohio State", "LSU", "Clemson", "Georgia", 
+                   "USC", "Florida", "Michigan", "Penn State", "Notre Dame",
+                   "Oklahoma", "Texas", "Miami")
+
+draft_data <- draft_data %>%
+  mutate(Power_School = ifelse(grepl(paste(power_schools, collapse="|"), College), "Yes", "No")) %>%
+  mutate(Power_School = factor(Power_School))
+
+# 4. THE MODEL: GAMMA REGRESSION
+# We use Gamma because production is right-skewed (Lots of average players, few Jerry Rices)
+model_grade <- glm(Yards_Per_Year ~ Height + Weight + BMI + Power_School, 
+                   family = Gamma(link = "log"), 
+                   data = draft_data)
+
+summary(model_grade)
+
+# 5. CREATE "DRAFT GRADES" (POE)
+# Production Over Expectation: Did they beat the model?
+draft_data$Expected_Yards <- predict(model_grade, type = "response")
+draft_data$Draft_Grade <- draft_data$Yards_Per_Year - draft_data$Expected_Yards
+
+# Identify the "Value Picks" (Label for the chart)
+draft_data$Label <- ifelse(draft_data$Draft_Grade > 0, "Value Pick", "Underperformer")
+
+# 6. VISUALIZATION: THE PROTOTYPE CHART
+ggplot(draft_data, aes(x = Weight, y = Yards_Per_Year)) +
+  # Plot points colored by whether they beat expectations
+  geom_point(aes(color = Draft_Grade), alpha = 0.7) +
+  # Add the Trend Line (The "Prototype")
+  geom_smooth(method = "glm", method.args = list(family = Gamma(link="log")), color = "black") +
+  # Label the biggest outliers (The Superstars who defied the odds)
+  geom_text_repel(data = filter(draft_data, abs(Draft_Grade) > 800),
+                  aes(label = Name), size = 3, max.overlaps = 15) +
+  # Make it look professional
+  scale_color_gradient2(low = "red", mid = "gray", high = "green4", midpoint = 0) +
+  labs(
+    title = "NFL Draft Analytics: Weight vs. Career Production",
+    subtitle = "Green = Player outperformed their physical prototype (Skill > Size)",
+    x = "Weight (lbs)",
+    y = "Avg Yards Per Season",
+    color = "Draft Grade"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+############################################################
+# PROJECT: The Anatomy of a Bust (Historical Analysis)
+# GOAL: Predict probability of a 'Bust' using Draft Capital
+# DATA: Matched players from 1967-2016
+############################################################
+
+library(tidyverse)
+
+# 1. LOAD DATA
+draft_df   <- read.csv("nfl_draft_prospects.csv")
+career_df  <- read.csv("Career_Stats_Receiving.csv")
+
+# 2. CLEAN & MATCH NAMES
+# Fix "Smith, Torrey" -> "Torrey Smith"
+career_clean <- career_df %>%
+  mutate(Receiving.Yards = as.numeric(gsub(",", "", Receiving.Yards))) %>%
+  separate(Name, into = c("Last", "First"), sep = ", ", extra = "merge", fill = "right") %>%
+  mutate(player_name = paste(First, Last)) %>%
+  group_by(player_name) %>%
+  summarize(
+    Career_Yards = sum(Receiving.Yards, na.rm=TRUE),
+    Draft_Year_Est = min(Year) # Estimate rookie year
+  )
+
+# Filter Draft data to stop at 2016 to match the career file
+draft_clean <- draft_df %>%
+  filter(draft_year <= 2016) %>%
+  select(player_name, overall, school, position) %>%
+  filter(position == "Wide Receiver")
+
+# 3. MERGE
+historical_data <- inner_join(draft_clean, career_clean, by = "player_name")
+
+# 4. DEFINE "BUST"
+# A Bust is a Top 100 pick who had less than 500 Career Yards
+historical_data <- historical_data %>%
+  mutate(
+    Is_Top_Pick = ifelse(overall <= 100, 1, 0),
+    Is_Bust = ifelse(overall <= 100 & Career_Yards < 500, 1, 0)
+  ) %>%
+  filter(Is_Top_Pick == 1) # Only look at high picks (low picks aren't busts)
+
+# 5. THE MODEL: LOGISTIC REGRESSION
+# Can we predict busts based on School and Draft Slot?
+bust_model <- glm(Is_Bust ~ overall + school, family = "binomial", data = historical_data)
+
+# 6. VISUALIZATION: BUST RATE BY DRAFT SLOT
+ggplot(historical_data, aes(x = overall, y = Is_Bust)) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), color = "red") +
+  labs(
+    title = "The 'Bust Curve': Probability of Failure by Draft Pick",
+    subtitle = "Analysis of Top 100 WRs (1967-2016)",
+    x = "Draft Pick Number (1-100)",
+    y = "Probability of < 500 Career Yards"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+############################################################
+# PROJECT: QB Career Survival Analysis (Safe Mode)
+# GOAL: Predict 'Risk of Retirement' using College QBR
+# MODEL: Cox Proportional Hazards
+# NOTE: Uses built-in graphics only (No download needed)
+############################################################
+
+library(tidyverse)
+library(survival)
+
+# 1. LOAD DATA
+qbr_data      <- read.csv("college_qbr.csv")
+draft_data    <- read.csv("nfl_draft_prospects.csv")
+nfl_basic     <- read.csv("Basic_Stats.csv")
+
+# 2. PREPARE COLLEGE QBR
+college_clean <- qbr_data %>%
+  group_by(player_name) %>%
+  filter(season == max(season)) %>% 
+  select(player_name, College_QBR = total_qbr) %>%
+  ungroup()
+
+# 3. PREPARE DRAFT PEDIGREE
+draft_clean <- draft_data %>%
+  filter(position == "Quarterback") %>%
+  select(player_name, Draft_Pick = overall, Draft_Year = draft_year)
+
+# 4. PREPARE NFL CAREER LENGTH
+nfl_clean <- nfl_basic %>%
+  separate(Name, into = c("Last", "First"), sep = ", ", extra = "merge", fill = "right") %>%
+  mutate(player_name = paste(First, Last)) %>%
+  mutate(
+    Parsed_Start = as.numeric(str_sub(Years.Played, 1, 4)),
+    Parsed_End   = as.numeric(str_sub(Years.Played, -4, -1)),
+    Is_Retired = ifelse(grepl("Active", Current.Status), 0, 1)
+  ) %>%
+  select(player_name, Parsed_Start, Parsed_End, Is_Retired)
+
+# 5. MERGE & IMPUTE DATES
+survival_data <- inner_join(college_clean, draft_clean, by = "player_name") %>%
+  inner_join(nfl_clean, by = "player_name") %>%
+  mutate(
+    Start_Year = coalesce(Parsed_Start, as.numeric(Draft_Year)),
+    End_Year = coalesce(Parsed_End, 2016),
+    Career_Length = (End_Year - Start_Year) + 1
+  ) %>%
+  filter(Career_Length > 0)
+
+print(paste("Total QBs Analyzed:", nrow(survival_data)))
+
+# 6. THE MODEL: COX PROPORTIONAL HAZARDS
+# This is the statistical core. It works without any extra packages.
+cox_model <- coxph(Surv(Career_Length, Is_Retired) ~ Draft_Pick + College_QBR, 
+                   data = survival_data)
+
+summary(cox_model)
+
+# 7. VISUALIZATION (Using Base R - No Downloads Required)
+# Create Tiers
+survival_data$QBR_Tier <- ifelse(survival_data$College_QBR > 75, "High QBR (>75)", "Low QBR (<75)")
+
+# Fit the survival curve
+fit <- survfit(Surv(Career_Length, Is_Retired) ~ QBR_Tier, data = survival_data)
+
+# Plot it using standard R graphics
+plot(fit, 
+     col = c("blue", "red"), 
+     lwd = 2, 
+     xlab = "Years in NFL", 
+     ylab = "Probability of Staying in League",
+     main = "Survival Analysis: High vs. Low College QBR")
+
+# Add a legend
+legend("topright", 
+       legend = c("High QBR (>75)", "Low QBR (<75)"), 
+       col = c("blue", "red"), 
+       lwd = 2, 
+       bty = "n")
+
+# Add a grid for readability
+grid()
+```
+
+```{r}
+############################################################
+# PROJECT: QB Longevity (Draft Pedigree vs. College Skill)
+# GOAL: Prove QBR adds value *regardless* of Draft Pick
+# VISUALS: 3 Professional-Grade Charts
+############################################################
+
+library(tidyverse)
+library(survival)
+
+# 1. LOAD & CLEAN DATA
+qbr_data      <- read.csv("college_qbr.csv")
+draft_data    <- read.csv("nfl_draft_prospects.csv")
+nfl_basic     <- read.csv("Basic_Stats.csv")
+
+# Prepare QBR
+qbr_clean <- qbr_data %>%
+  group_by(player_name) %>%
+  filter(season == max(season)) %>% 
+  select(player_name, College_QBR = total_qbr) %>%
+  ungroup()
+
+# Prepare Draft (Quarterbacks only)
+draft_clean <- draft_data %>%
+  filter(position == "Quarterback") %>%
+  select(player_name, Draft_Pick = overall, Draft_Year = draft_year) %>%
+  mutate(
+    Draft_Round = case_when(
+      Draft_Pick <= 32 ~ "1st Round",
+      Draft_Pick <= 100 ~ "Day 2 (Rds 2-3)",
+      TRUE ~ "Day 3 (Rds 4-7)"
+    )
+  )
+
+# Prepare Career Length
+nfl_clean <- nfl_basic %>%
+  separate(Name, into = c("Last", "First"), sep = ", ", extra = "merge", fill = "right") %>%
+  mutate(player_name = paste(First, Last)) %>%
+  mutate(
+    Parsed_Start = as.numeric(str_sub(Years.Played, 1, 4)),
+    Parsed_End   = as.numeric(str_sub(Years.Played, -4, -1)),
+    Is_Retired = ifelse(grepl("Active", Current.Status), 0, 1)
+  ) %>%
+  select(player_name, Parsed_Start, Parsed_End, Is_Retired)
+
+# Merge
+master_data <- inner_join(qbr_clean, draft_clean, by = "player_name") %>%
+  inner_join(nfl_clean, by = "player_name") %>%
+  mutate(
+    Start_Year = coalesce(Parsed_Start, as.numeric(Draft_Year)),
+    End_Year = coalesce(Parsed_End, 2016),
+    Career_Length = (End_Year - Start_Year) + 1,
+    QBR_Tier = ifelse(College_QBR >= 70, "High QBR (>70)", "Low QBR (<70)")
+  ) %>%
+  filter(Career_Length > 0)
+
+# --- MODELING ---
+
+# Model 1: Cox PH (The Statistical Proof)
+# Does QBR matter even when we account for Draft Pick?
+cox_model <- coxph(Surv(Career_Length, Is_Retired) ~ Draft_Pick + College_QBR, data = master_data)
+print("--- COX MODEL RESULTS ---")
+summary(cox_model)
+
+# --- VISUALIZATION ---
+
+# GRAPH 1: The "Value Add" Chart (Bar Plot)
+# Comparison of Career Length by Round, split by QBR
+# This proves that a High QBR guy beats a Low QBR guy *in the same round*
+summary_stats <- master_data %>%
+  group_by(Draft_Round, QBR_Tier) %>%
+  summarize(Avg_Years = mean(Career_Length), .groups = 'drop')
+
+ggplot(summary_stats, aes(x = Draft_Round, y = Avg_Years, fill = QBR_Tier)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") +
+  scale_fill_manual(values = c("#2E9FDF", "#E7B800")) +
+  labs(
+    title = "The QBR Advantage: Career Length by Draft Round",
+    subtitle = "In every draft tier, High QBR quarterbacks play longer.",
+    y = "Average Years in NFL",
+    x = "Draft Round"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+
+# GRAPH 2: The "Survival Battle" (Kaplan-Meier Curve)
+# Simple Base R plot to avoid 'survminer' errors
+fit <- survfit(Surv(Career_Length, Is_Retired) ~ QBR_Tier, data = master_data)
+
+plot(fit, col = c("#2E9FDF", "#E7B800"), lwd = 3,
+     xlab = "Years in NFL", ylab = "Percent of QBs Remaining",
+     main = "Survival Curve: High vs. Low QBR")
+legend("topright", legend = c("High QBR (>70)", "Low QBR (<70)"), 
+       col = c("#2E9FDF", "#E7B800"), lwd = 3, bty = "n")
+grid()
+
+
+# GRAPH 3: The "Investment vs. Return" Scatter
+# Visualizing every QB data point
+ggplot(master_data, aes(x = Draft_Pick, y = Career_Length)) +
+  geom_point(aes(color = College_QBR), size = 3, alpha = 0.8) +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed") +
+  scale_color_viridis_c(option = "plasma") +
+  labs(
+    title = "Draft Capital vs. Longevity",
+    subtitle = "Lighter dots (High QBR) tend to float to the top of the chart.",
+    x = "Draft Pick (1 = First Overall)",
+    y = "Total Years in NFL",
+    color = "College QBR"
+  ) +
+  theme_minimal()
+```

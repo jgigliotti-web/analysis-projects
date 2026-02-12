@@ -1,0 +1,159 @@
+---
+title: "NFL QB EPA"
+output: html_document
+date: "2026-01-27"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+```{r}
+############################################################
+# PROJECT 2: The Mobile QB Revolution
+# GOAL: Track the changing value of 'Running QBs' over 15 years
+# MODEL: Linear Regression with Interaction Effects
+############################################################
+
+library(tidyverse)
+
+# 1. LOAD DATA
+qbr_data <- read.csv("college_qbr.csv")
+draft    <- read.csv("nfl_draft_prospects.csv")
+
+# 2. PREPARE QBR (Get Pass vs Run Splits)
+# We want their final college season stats
+qbr_clean <- qbr_data %>%
+  group_by(player_name) %>%
+  filter(season == max(season)) %>%
+  select(player_name, EPA_Pass = pass, EPA_Run = run, College_Year = season) %>%
+  ungroup()
+
+# 3. PREPARE DRAFT DATA
+draft_clean <- draft %>%
+  filter(position == "Quarterback") %>%
+  select(player_name, Draft_Pick = overall, Draft_Year = draft_year) %>%
+  drop_na(Draft_Pick)
+
+# 4. MERGE DATA
+qb_trends <- inner_join(qbr_clean, draft_clean, by = "player_name")
+
+# 5. CREATE ERAS
+# We split history into "Old School" (Pre-2012) and "New School" (Post-2012)
+# 2012 is the RG3 / Russell Wilson / Cam Newton turning point
+qb_trends <- qb_trends %>%
+  mutate(Era = ifelse(Draft_Year < 2012, "Pre-Revolution (2004-2011)", "Modern Era (2012-2021)"))
+
+# 6. THE MODEL: INTERACTION EFFECT
+# Does the impact of 'EPA_Run' on Draft Pick change depending on the Year?
+trend_model <- lm(Draft_Pick ~ EPA_Pass + EPA_Run * Draft_Year, data = qb_trends)
+
+summary(trend_model)
+
+# 7. VISUALIZATION: THE REVOLUTION CHART
+ggplot(qb_trends, aes(x = EPA_Run, y = Draft_Pick)) +
+  geom_point(alpha = 0.5) +
+  # We draw two trend lines to show the shift
+  geom_smooth(method = "lm", aes(color = Era), size = 1.5, se = FALSE) +
+  scale_y_reverse() + # Lower pick is better
+  labs(
+    title = "The Mobile QB Revolution",
+    subtitle = "How the NFL learned to love the Running Quarterback",
+    x = "College Expected Points Added (Run)",
+    y = "Draft Pick (Lower is Better)"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+############################################################
+# PROJECT 1: The SEC Premium
+# GOAL: Quantify the 'Draft Stock Boost' of playing in the SEC
+# MODEL: Linear Regression (Predicting Draft Pick)
+############################################################
+
+library(tidyverse)
+
+# 1. LOAD DATA
+col_stats <- read.csv("college_statistics.csv")
+draft     <- read.csv("nfl_draft_prospects.csv")
+
+# 2. DEFINE THE SEC (The "Bias" Variable)
+# We manually list the Power Schools to create our comparison group
+sec_schools <- c("Alabama", "LSU", "Georgia", "Florida", "Auburn", 
+                 "Texas A&M", "Ole Miss", "Mississippi State", "Tennessee", 
+                 "Arkansas", "Kentucky", "Missouri", "South Carolina", "Vanderbilt")
+
+# 3. PREPARE COLLEGE STATS (Focus on WRs for direct comparison)
+# We aggregate career Yards and TDs
+stats_clean <- col_stats %>%
+  filter(pos_abbr == "WR") %>%
+  filter(statistic %in% c("Receiving Yards", "Receiving Touchdowns")) %>%
+  group_by(player_name, school) %>%
+  summarize(
+    Total_Yards = sum(value, na.rm = TRUE),
+    Total_TDs   = sum(value, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  # Filter for "Draftable" production to remove noise
+  filter(Total_Yards > 1000)
+
+# 4. PREPARE DRAFT DATA
+draft_clean <- draft %>%
+  filter(position == "Wide Receiver") %>%
+  select(player_name, Draft_Pick = overall, Height = height, Weight = weight, School = school) %>%
+  drop_na(Draft_Pick)
+
+# 5. MERGE & FEATURE ENGINEERING
+sec_data <- inner_join(stats_clean, draft_clean, by = "player_name") %>%
+  mutate(
+    # Create the Binary Flag: Is this player from the SEC?
+    Is_SEC = ifelse(School %in% sec_schools, 1, 0),
+    Conference_Group = ifelse(Is_SEC == 1, "SEC", "Non-SEC")
+  )
+
+print(paste("Players Analyzed:", nrow(sec_data)))
+
+# 6. THE MODEL: THE "PREMIUM" REGRESSION
+# We control for Size (Height/Weight) and Production (Yards/TDs).
+# The coefficient for 'Is_SEC' tells us the bias.
+bias_model <- lm(Draft_Pick ~ Total_Yards + Total_TDs + Weight + Height + Is_SEC, 
+                 data = sec_data)
+
+summary(bias_model)
+
+# 7. VISUALIZATION: PRODUCTION VS. DRAFT PICK (Colored by SEC)
+ggplot(sec_data, aes(x = Total_Yards, y = Draft_Pick)) +
+  geom_point(aes(color = Conference_Group), size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", aes(color = Conference_Group), se = FALSE) +
+  scale_y_reverse() + # Reverse axis because Lower Pick # is Better
+  scale_color_manual(values = c("gray", "#FFD700")) + # Gold for SEC
+  labs(
+    title = "The SEC Premium: Do SEC players get drafted higher?",
+    subtitle = "Comparing Draft Position vs. College Production (Lower Y-Axis is Better)",
+    x = "Career College Receiving Yards",
+    y = "Draft Pick Number (1-256)",
+    color = "Conference"
+  ) +
+  theme_minimal()
+```
