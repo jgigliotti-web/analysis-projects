@@ -76,8 +76,4 @@
     * Generated an `Actual vs. Predicted` regression plot to validate the model's pricing accuracy.
 ---
 
-## 🛠Libraries & Tools Used
-* **Data Manipulation:** `tidyverse`, `janitor`
-* **Time Series:** `zoo` (Rolling averages, Lags)
-* **Statistical Modeling:** `survival` (Cox PH), `lmtest`, `performance`
-* **Visualization:** `ggplot2`, `ggrepel`, `corrplot`
+
