@@ -1,6 +1,6 @@
 # Sports Analytics Portfolio
 **Author:** Jacob Gigliotti
-**Background:** Medical Underwriter | Former NCAA Athlete (Salisbury University)
+**Background:** Medical Data Analytics and Underwriter | Former NCAA Athlete (Salisbury University)
 **Tech Stack:** R (tidyverse, survival, zoo), Python, SQL
 
 ---
